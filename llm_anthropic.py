@@ -1,8 +1,12 @@
-from anthropic import Anthropic, AsyncAnthropic
+from anthropic import (
+    Anthropic, AsyncAnthropic,
+    AnthropicBedrock, AsyncAnthropicBedrock
+)
 import llm
 import json
 from pydantic import Field, field_validator, model_validator
 from typing import Optional, List, Union
+
 
 DEFAULT_THINKING_TOKENS = 1024
 DEFAULT_TEMPERATURE = 1.0
@@ -91,6 +95,52 @@ def register_models(register):
         ),
         aliases=("claude-3.7-sonnet", "claude-3.7-sonnet-latest"),
     )
+    # bedrock 3.7
+    register(
+        ClaudeMessages(
+            "bedrock/claude-3-7-sonnet-20250219",
+            supports_pdf=False,
+            supports_thinking=True,
+            default_max_tokens=8192,
+        ),
+        AsyncClaudeMessages(
+            "bedrock/claude-3-7-sonnet-20250219",
+            supports_pdf=False,
+            supports_thinking=True,
+            default_max_tokens=8192,
+        ),
+    ),
+    register(
+        ClaudeMessages(
+            "bedrock/us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+            supports_pdf=False,
+            supports_thinking=True,
+            default_max_tokens=8192,
+        ),
+        AsyncClaudeMessages(
+            "bedrock/us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+            supports_pdf=False,
+            supports_thinking=True,
+            default_max_tokens=8192,
+        ),
+    )
+    register(
+        ClaudeMessages(
+            "bedrock/claude-3-7-sonnet-latest",
+            supports_pdf=False,
+            supports_thinking=True,
+            default_max_tokens=8192,
+            client_class=AnthropicBedrock,
+            async_client_class=AsyncAnthropicBedrock,
+        ),
+        AsyncClaudeMessages(
+            "bedrock/claude-3-7-sonnet-latest",
+            supports_pdf=False,
+            supports_thinking=True,
+            default_max_tokens=8192,
+        ),
+        aliases=("claude-3.7-sonnet", "claude-3.7-sonnet-latest"),
+    )
 
 
 class ClaudeOptions(llm.Options):
@@ -144,7 +194,7 @@ class ClaudeOptions(llm.Options):
             try:
                 stop_sequences = json.loads(stop_sequences)
                 if not isinstance(stop_sequences, list) or not all(
-                    isinstance(seq, str) for seq in stop_sequences
+                        isinstance(seq, str) for seq in stop_sequences
                 ):
                     raise ValueError(error_msg)
                 return stop_sequences
@@ -218,19 +268,33 @@ class _Shared:
     supports_schema = True
     default_max_tokens = 4096
 
-    class Options(ClaudeOptions): ...
+    class Options(ClaudeOptions):
+        ...
 
     def __init__(
-        self,
-        model_id,
-        claude_model_id=None,
-        supports_images=True,
-        supports_pdf=False,
-        supports_thinking=False,
-        default_max_tokens=None,
+            self,
+            model_id,
+            claude_model_id=None,
+            supports_images=True,
+            supports_pdf=False,
+            supports_thinking=False,
+            default_max_tokens=None,
+            client_class=None,
+            async_client_class=None,
     ):
-        self.model_id = "anthropic/" + model_id
-        self.claude_model_id = claude_model_id or model_id
+        self.client_class = client_class or Anthropic
+        self.async_client_class = async_client_class or AsyncAnthropic
+
+        if model_id.startswith("bedrock/"):
+            self.client_class = AnthropicBedrock
+            self.async_client_class = AsyncAnthropicBedrock
+            self.model_id = model_id
+            self.needs_key = None  # no key needed for bedrock
+            self.claude_model_id = claude_model_id or model_id.partition("bedrock/")[-1]
+        else:
+            self.model_id = "anthropic/" + model_id
+            self.claude_model_id = claude_model_id or model_id
+
         self.attachment_types = set()
         if supports_images:
             self.attachment_types.update(
@@ -336,7 +400,7 @@ class _Shared:
             kwargs["stop_sequences"] = prompt.options.stop_sequences
 
         if self.supports_thinking and (
-            prompt.options.thinking or prompt.options.thinking_budget
+                prompt.options.thinking or prompt.options.thinking_budget
         ):
             prompt.options.thinking = True
             budget_tokens = prompt.options.thinking_budget or DEFAULT_THINKING_TOKENS
@@ -346,9 +410,9 @@ class _Shared:
         if prompt.options.max_tokens is not None:
             max_tokens = prompt.options.max_tokens
         if (
-            self.supports_thinking
-            and prompt.options.thinking_budget is not None
-            and prompt.options.thinking_budget > max_tokens
+                self.supports_thinking
+                and prompt.options.thinking_budget is not None
+                and prompt.options.thinking_budget > max_tokens
         ):
             max_tokens = prompt.options.thinking_budget + 1
         kwargs["max_tokens"] = max_tokens
@@ -381,7 +445,7 @@ class _Shared:
 
 class ClaudeMessages(_Shared, llm.KeyModel):
     def execute(self, prompt, stream, response, conversation, key):
-        client = Anthropic(api_key=self.get_key(key))
+        client = self.client_class(api_key=self.get_key(key)) if self.needs_key else self.client_class()
         kwargs = self.build_kwargs(prompt, conversation)
         prefill_text = self.prefill_text(prompt)
         if "betas" in kwargs:
@@ -413,7 +477,7 @@ class ClaudeMessages(_Shared, llm.KeyModel):
 
 class AsyncClaudeMessages(_Shared, llm.AsyncKeyModel):
     async def execute(self, prompt, stream, response, conversation, key):
-        client = AsyncAnthropic(api_key=self.get_key(key))
+        client = self.async_client_class(api_key=self.get_key(key)) if self.needs_key else self.async_client_class()
         kwargs = self.build_kwargs(prompt, conversation)
         if "betas" in kwargs:
             messages_client = client.beta.messages
